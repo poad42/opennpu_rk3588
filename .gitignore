@@ -1,0 +1,38 @@
+# Build artifacts
+*.so
+*.o
+pjrt_npu.c
+pjrt_npu_impl_combined.c
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Weights and models (user-generated)
+*.npz
+*.bin
+*.vendor_model
+*.onnx
+gpt2_w*
+
+# NPU state captures (user-generated)
+dumps/
+dump_*.bin
+
+# Templates (user-generated)
+templates/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db

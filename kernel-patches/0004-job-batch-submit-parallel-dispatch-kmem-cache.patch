@@ -1,0 +1,168 @@
+--- a/drivers/rknpu/rknpu_job.c	2026-03-03 21:40:08.756128000 -0700
++++ b/drivers/rknpu/rknpu_job.c	2026-08-03 13:44:05.396422036 -0600
+@@ -18,6 +18,8 @@
+ #include "rknpu_iommu.h"
+ #include "rknpu_job.h"
+ 
++static struct kmem_cache *rknpu_job_cache = NULL;
++
+ #define _REG_READ(base, offset) readl(base + (offset))
+ #define _REG_WRITE(base, value, offset) writel(value, base + (offset))
+ 
+@@ -107,7 +109,10 @@
+ 	if (job->args_owner)
+ 		kfree(job->args);
+ 
+-	kfree(job);
++	if (rknpu_job_cache)
++		kmem_cache_free(rknpu_job_cache, job);
++	else
++		kfree(job);
+ }
+ 
+ static int rknpu_job_cleanup(struct rknpu_job *job)
+@@ -134,7 +139,10 @@
+ 	struct rknpu_gem_object *task_obj = NULL;
+ #endif
+ 
+-	job = kzalloc(sizeof(*job), GFP_KERNEL);
++	if (rknpu_job_cache)
++		job = kmem_cache_zalloc(rknpu_job_cache, GFP_KERNEL);
++	else
++		job = kzalloc(sizeof(*job), GFP_KERNEL);
+ 	if (!job)
+ 		return NULL;
+ 
+@@ -162,7 +170,7 @@
+ 
+ 	job->args = kzalloc(sizeof(*args), GFP_KERNEL);
+ 	if (!job->args) {
+-		kfree(job);
++		if (rknpu_job_cache) kmem_cache_free(rknpu_job_cache, job); else kfree(job);
+ 		return NULL;
+ 	}
+ 	*job->args = *args;
+@@ -1054,3 +1062,123 @@
+ 
+ 	return ret;
+ }
++
++/* Batch submit: submit up to 3 jobs with parallel dispatch.
++ * All jobs are allocated, fences created, and added to todo_lists in ONE
++ * spinlock section. Then all 3 cores are committed to hardware back-to-back
++ * with no locks held. This ensures all 3 NPU cores start within microseconds
++ * of each other, achieving true parallel execution. */
++int rknpu_batch_submit(struct rknpu_device *rknpu_dev,
++		       struct rknpu_batch_submit *batch)
++{
++	struct rknpu_submit jobs[3];
++	struct rknpu_job *job_list[3] = {NULL, NULL, NULL};
++	unsigned long flags;
++	int ret = 0, i, n;
++	int core;
++
++	n = batch->n_jobs;
++	if (n == 0 || n > 3)
++		return -EINVAL;
++
++	if (copy_from_user(jobs, (void __user *)batch->jobs_ptr,
++			   sizeof(struct rknpu_submit) * n))
++		return -EFAULT;
++
++	/* Phase 1: Allocate all jobs + fences (no locks) */
++	for (i = 0; i < n; i++) {
++		job_list[i] = rknpu_job_alloc(rknpu_dev, &jobs[i]);
++		if (!job_list[i]) {
++			ret = -ENOMEM;
++			goto err_alloc;
++		}
++		if (jobs[i].flags & RKNPU_JOB_FENCE_OUT) {
++#ifdef CONFIG_ROCKCHIP_RKNPU_FENCE
++			ret = rknpu_fence_alloc(job_list[i]);
++			if (ret)
++				goto err_alloc;
++			job_list[i]->args->fence_fd =
++				rknpu_fence_get_fd(job_list[i]);
++			jobs[i].fence_fd = job_list[i]->args->fence_fd;
++#else
++			ret = -EINVAL;
++			goto err_alloc;
++#endif
++		}
++	}
++
++	/* Phase 2: IOMMU domain get (once for all jobs) */
++	for (i = 0; i < n; i++) {
++		if (rknpu_iommu_domain_get_and_switch(rknpu_dev,
++				jobs[i].iommu_domain_id)) {
++			ret = -EINVAL;
++			goto err_iommu;
++		}
++	}
++
++	/* Phase 3: Add all jobs to todo_lists AND pop+set in ONE spinlock */
++	spin_lock_irqsave(&rknpu_dev->irq_lock, flags);
++	for (i = 0; i < n; i++) {
++		core = ffs(jobs[i].core_mask) - 1;
++		if (core >= 0 && core < rknpu_dev->config->num_irqs) {
++			struct rknpu_subcore_data *sd =
++				&rknpu_dev->subcore_datas[core];
++			list_add_tail(&job_list[i]->head[core],
++				      &sd->todo_list);
++			sd->task_num +=
++				rknpu_get_task_number(job_list[i], core);
++			/* Immediately pop if core is idle */
++			if (!sd->job && !list_empty(&sd->todo_list)) {
++				struct rknpu_job *j =
++					list_first_entry(&sd->todo_list,
++						struct rknpu_job, head[core]);
++				list_del_init(&j->head[core]);
++				sd->job = j;
++				j->hw_commit_time = ktime_get();
++				j->hw_recoder_time = j->hw_commit_time;
++			}
++		}
++	}
++	spin_unlock_irqrestore(&rknpu_dev->irq_lock, flags);
++
++	/* Phase 4: Commit all jobs to hardware (NO locks — per-core REG_WRITE) */
++	for (i = 0; i < n; i++) {
++		core = ffs(jobs[i].core_mask) - 1;
++		if (core >= 0 && core < rknpu_dev->config->num_irqs) {
++			if (atomic_dec_and_test(&job_list[i]->run_count))
++				rknpu_job_commit(job_list[i]);
++		}
++	}
++
++	/* Copy results (fence_fds) back to userspace */
++	if (copy_to_user((void __user *)batch->jobs_ptr, jobs,
++			 sizeof(struct rknpu_submit) * n))
++		return -EFAULT;
++
++	return 0;
++
++err_iommu:
++	/* Release IOMMU domains we acquired */
++	for (i = 0; i < n; i++)
++		if (job_list[i])
++			rknpu_iommu_domain_put(rknpu_dev);
++err_alloc:
++	for (i = 0; i < n; i++)
++		if (job_list[i])
++			rknpu_job_free(job_list[i]);
++	return ret;
++}
++
++
++int rknpu_job_cache_init(void)
++{
++	rknpu_job_cache = kmem_cache_create("rknpu_job",
++		sizeof(struct rknpu_job), 0, 0, NULL);
++	return rknpu_job_cache ? 0 : -ENOMEM;
++}
++
++void rknpu_job_cache_exit(void)
++{
++	if (rknpu_job_cache)
++		kmem_cache_destroy(rknpu_job_cache);
++}

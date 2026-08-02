@@ -1,0 +1,9 @@
+project = 'OpenNPU'
+copyright = '2025, Adhitya Mohan'
+author = 'Adhitya Mohan'
+release = '1.0'
+extensions = ['myst_parser']
+templates_path = ['_templates']
+exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
+html_theme = 'sphinx_rtd_theme'
+source_suffix = ['.rst', '.md']

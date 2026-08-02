@@ -1,0 +1,117 @@
+--- a/drivers/rknpu/rknpu_drv.c	2026-03-03 21:40:08.756128000 -0700
++++ b/drivers/rknpu/rknpu_drv.c	2026-08-03 13:34:20.769420420 -0600
+@@ -285,6 +285,27 @@
+ 	.cache_sgt_init = rk3576_cache_sgt_init,
+ };
+ 
++static const struct rknpu_config rv1126b_rknpu_config = {
++	.bw_priority_addr = 0x0,
++	.bw_priority_length = 0x0,
++	.dma_mask = DMA_BIT_MASK(40),
++	.pc_data_amount_scale = 2,
++	.pc_task_number_bits = 16,
++	.pc_task_number_mask = 0xffff,
++	.pc_task_status_offset = 0x48,
++	.pc_dma_ctrl = 1,
++	.irqs = rknpu_irqs,
++	.num_irqs = ARRAY_SIZE(rknpu_irqs),
++	.nbuf_phyaddr = 0x3ff30000,
++	.nbuf_size = 512 * 1024,
++	.max_submit_number = (1 << 16) - 1,
++	.core_mask = 0x1,
++	.amount_top = &rknpu_top_amount,
++	.amount_core = NULL,
++	.state_init = NULL,
++	.cache_sgt_init = NULL,
++};
++
+ /* driver probe and init */
+ static const struct of_device_id rknpu_of_match[] = {
+ 	{
+@@ -311,6 +332,10 @@
+ 		.compatible = "rockchip,rk3576-rknpu",
+ 		.data = &rk3576_rknpu_config,
+ 	},
++	{
++		.compatible = "rockchip,rv1126b-rknpu",
++		.data = &rv1126b_rknpu_config,
++	},
+ 	{},
+ };
+ 
+@@ -541,8 +566,16 @@
+ 			"Fd close free rknpu_obj: %#llx, rknpu_obj->dma_addr: %#llx\n",
+ 			(__u64)(uintptr_t)entry, (__u64)entry->dma_addr);
+ 
+-		vunmap(entry->kv_addr);
+-		entry->kv_addr = NULL;
++		if (entry->kv_addr) {
++			struct iosys_map map =
++				IOSYS_MAP_INIT_VADDR(entry->kv_addr);
++			dma_buf_vunmap(entry->dmabuf, &map);
++			entry->kv_addr = NULL;
++		}
++
++		dma_buf_unmap_attachment(entry->attachment, entry->sgt,
++					 DMA_BIDIRECTIONAL);
++		dma_buf_detach(entry->dmabuf, entry->attachment);
+ 
+ 		if (!entry->owner)
+ 			dma_buf_put(entry->dmabuf);
+@@ -661,6 +694,17 @@
+ 
+ RKNPU_IOCTL(rknpu_action_ioctl);
+ RKNPU_IOCTL(rknpu_submit_ioctl);
++
++#ifdef CONFIG_ROCKCHIP_RKNPU_DRM_GEM
++static int rknpu_batch_submit_ioctl(struct drm_device *dev, void *data,
++				    struct drm_file *file_priv)
++{
++	struct rknpu_device *rknpu_dev = dev_get_drvdata(dev->dev);
++	return rknpu_batch_submit(rknpu_dev, (struct rknpu_batch_submit *)data);
++}
++#endif
++
++RKNPU_IOCTL(rknpu_batch_submit_ioctl);
+ RKNPU_IOCTL(rknpu_gem_create_ioctl);
+ RKNPU_IOCTL(rknpu_gem_map_ioctl);
+ RKNPU_IOCTL(rknpu_gem_destroy_ioctl);
+@@ -668,7 +712,8 @@
+ 
+ static const struct drm_ioctl_desc rknpu_ioctls[] = {
+ 	DRM_IOCTL_DEF_DRV(RKNPU_ACTION, __rknpu_action_ioctl, DRM_RENDER_ALLOW),
+-	DRM_IOCTL_DEF_DRV(RKNPU_SUBMIT, __rknpu_submit_ioctl, DRM_RENDER_ALLOW),
++	DRM_IOCTL_DEF_DRV(RKNPU_SUBMIT, __rknpu_submit_ioctl, DRM_UNLOCKED | DRM_RENDER_ALLOW),
++	DRM_IOCTL_DEF_DRV(RKNPU_BATCH_SUBMIT, __rknpu_batch_submit_ioctl, DRM_UNLOCKED | DRM_RENDER_ALLOW),
+ 	DRM_IOCTL_DEF_DRV(RKNPU_MEM_CREATE, __rknpu_gem_create_ioctl,
+ 			  DRM_RENDER_ALLOW),
+ 	DRM_IOCTL_DEF_DRV(RKNPU_MEM_MAP, __rknpu_gem_map_ioctl,
+@@ -1418,6 +1463,7 @@
+ 	rknpu_dev->heap = rk_dma_heap_find("rk-dma-heap-cma");
+ 	if (!rknpu_dev->heap) {
+ 		LOG_DEV_ERROR(dev, "failed to find cma heap\n");
++		misc_deregister(&rknpu_dev->miscdev);
+ 		return -ENOMEM;
+ 	}
+ 	rk_dma_heap_set_dev(dev);
+@@ -1640,14 +1686,20 @@
+ 	},
+ };
+ 
++int rknpu_job_cache_init(void);
++void rknpu_job_cache_exit(void);
++
+ static int rknpu_init(void)
+ {
++	int ret = rknpu_job_cache_init();
++	if (ret) return ret;
+ 	return platform_driver_register(&rknpu_driver);
+ }
+ 
+ static void rknpu_exit(void)
+ {
+ 	platform_driver_unregister(&rknpu_driver);
++	rknpu_job_cache_exit();
+ }
+ 
+ late_initcall(rknpu_init);

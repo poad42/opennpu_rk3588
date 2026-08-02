@@ -1,0 +1,21 @@
+--- a/drivers/rknpu/include/rknpu_ioctl.h	2026-03-03 21:40:08.755128000 -0700
++++ b/drivers/rknpu/include/rknpu_ioctl.h	2026-08-03 13:34:52.667462683 -0600
+@@ -327,4 +327,18 @@
+ 	RKNPU_IOWR(RKNPU_MEM_DESTROY, struct rknpu_mem_destroy)
+ #define IOCTL_RKNPU_MEM_SYNC RKNPU_IOWR(RKNPU_MEM_SYNC, struct rknpu_mem_sync)
+ 
++/* Batch submit: submit up to 3 jobs in one ioctl (reduces syscall overhead) */
++#define RKNPU_BATCH_SUBMIT 0x06
++
++struct rknpu_batch_submit {
++	__u32 n_jobs;
++	__u32 reserved;
++	__u64 jobs_ptr;
++};
++
++#define IOCTL_RKNPU_BATCH_SUBMIT RKNPU_IOWR(RKNPU_BATCH_SUBMIT, struct rknpu_batch_submit)
++#define DRM_IOCTL_RKNPU_BATCH_SUBMIT \
++	DRM_IOWR(DRM_COMMAND_BASE + RKNPU_BATCH_SUBMIT, struct rknpu_batch_submit)
++
+ #endif
++

@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opennpu-rk3588"
+version = "1.0.0"
+description = "Open-source compiler + runtime for the RK3588 NPU (raw DRM ioctls, no proprietary libraries)"
+readme = "README.md"
+license = {text = "MIT", author = "Adhitya Mohan"}
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+]
+
+[project.optional-dependencies]
+jax = ["jax==0.10.2", "jaxlib==0.10.2"]
+onnx = ["onnx", "onnxruntime"]
+torch = ["torch", "transformers"]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+opennpu = ["pjrt_c/*.h"]

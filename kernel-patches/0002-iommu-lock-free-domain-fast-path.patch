@@ -1,0 +1,25 @@
+--- a/drivers/rknpu/rknpu_iommu.c	2026-03-03 21:40:08.756128000 -0700
++++ b/drivers/rknpu/rknpu_iommu.c	2026-08-03 13:33:02.371730609 -0600
+@@ -364,7 +364,7 @@
+ 	}
+ }
+ 
+-#if defined(CONFIG_IOMMU_API) && defined(CONFIG_NO_GKI)
++#if defined(CONFIG_IOMMU_API) && defined(CONFIG_NO_GKI) && !defined(CONFIG_ARM)
+ 
+ #if KERNEL_VERSION(6, 1, 0) <= LINUX_VERSION_CODE
+ struct iommu_group {
+@@ -519,6 +519,13 @@
+ 	unsigned long start = jiffies;
+ 	int ret = -EINVAL;
+ 
++	/* Fast path: same domain already active, lock-free refcount increment */
++	if (domain_id == rknpu_dev->iommu_domain_id &&
++	    atomic_read(&rknpu_dev->iommu_domain_refcount) > 0) {
++		atomic_inc(&rknpu_dev->iommu_domain_refcount);
++		return 0;
++	}
++
+ 	while (true) {
+ 		mutex_lock(&rknpu_dev->domain_lock);
+ 
