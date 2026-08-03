@@ -3,7 +3,7 @@
 
 Single entry point for GPT-2 124M generation. All 84 matmuls per token
 run on the NPU via CNA descriptor (raw DRM ioctls). KV cache eliminates
-recomputation — 28 ms/token (36 tok/s), 1.6x faster than prior art.
+recomputation — 28 ms/token (36 tok/s), .
 
 No librknnrt at runtime. No RKNN toolkit at runtime. Pure open stack.
 

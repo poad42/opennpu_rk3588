@@ -23,7 +23,7 @@ No proprietary libraries at runtime. No vendor toolkits at runtime. Pure open st
 
 | Achievement | Detail |
 |---|---|
-| GPT-2 124M on NPU (KV cache) | 28ms/token (36 tok/s), 1.6x faster than prior art, coherent text |
+| GPT-2 124M on NPU (KV cache) | 28ms/token (36 tok/s), coherent text |
 | GPT-2 124M on NPU (CNA M=64) | 74ms/token (13.5 tok/s), 2.8x faster than template |
 | Vision encoder (SigLIP) on NPU | 98% NPU load, 1.6x faster than CPU per-core, 6.2x with 3 cores |
 | JAX on NPU | `jax.devices()` returns `[npu:0]`, `jax.jit` executes on NPU |

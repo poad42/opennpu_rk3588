@@ -569,7 +569,7 @@ For a complete GPT-2 forward pass with KV caching, see
 ### Vision encoder (hybrid execution)
 
 For ViT blocks where the NPU does matmuls and the CPU does attention/GELU,
-see [`examples/torch_vision_encoder.py`](../examples/torch_vision_encoder.py).
+see [`examples/vision_encoder.py`](../examples/vision_encoder.py).
 
 ---
 
@@ -704,7 +704,7 @@ def vit_block(x):
 > **Note**: JAX multi-op programs with mixed `custom_call` + `jnp` ops are
 > experimental. The plugin's multi-op executor may not handle all
 > combinations. For production use, prefer the ctypes path (PyTorch) or
-> the ONNX runner. See [`examples/jax_vision_encoder.py`](../examples/jax_vision_encoder.py).
+> the ONNX runner. See [`examples/vision_encoder.py`](../examples/vision_encoder.py).
 
 ---
 

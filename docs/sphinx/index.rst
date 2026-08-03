@@ -15,6 +15,6 @@ Open-source NPU runtime for the RK3588.
 
 .. toctree::
    :maxdepth: 1
-   :caption: API
+   :caption: Reference
 
    api
