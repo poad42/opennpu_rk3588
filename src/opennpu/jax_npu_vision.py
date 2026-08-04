@@ -136,3 +136,17 @@ def load_lm_weights(model_name="gpt2", max_seq=1024):
     params_path = os.path.join(tempfile.gettempdir(), f"{model_name}_w_params.bin")
     lm.load_weights(w_f32, w_f16, params_path)
     _backend._lm = lm
+
+
+def load_llama_weights(model):
+    """Load a HuggingFace LLaMA/Qwen model onto the NPU for fast generation.
+
+    model: transformers LLaMAForCausalLM (or similar). Must have
+    q_proj/k_proj/v_proj/o_proj + mlp.gate_proj/up_proj/down_proj.
+    Call once before npu_lm_generate().
+    """
+    from opennpu.lm import load_llama_weights as _load_llama
+    global _backend
+    _backend = _NPUBackend.get()
+    lm = _load_llama(model)
+    _backend._lm = lm

@@ -15,6 +15,11 @@ def _setup_signatures(lib):
         ("npu_cna_cache_load", ctypes.c_int, [ctypes.c_int, ctypes.c_void_p, ctypes.c_int, ctypes.c_int]),
         ("npu_cna_close", None, []),
         ("npu_lm_init", ctypes.c_int, [ctypes.c_int]*6 + [ctypes.c_float]),
+        ("npu_lm_init2", ctypes.c_int, [ctypes.c_int]*6 + [ctypes.c_float, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_float]),
+        ("npu_lm_load_slot", ctypes.c_int, [ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_int, ctypes.c_int]),
+        ("npu_lm_load_norm", ctypes.c_int, [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]),
+        ("npu_lm_load_embed", ctypes.c_int, [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int]),
+        ("npu_lm_load_final_norm", ctypes.c_int, [ctypes.c_void_p, ctypes.c_void_p]),
         ("npu_lm_load_params", ctypes.c_int, [ctypes.c_char_p]),
         ("npu_lm_reset", None, []),
         ("npu_lm_step", ctypes.c_int, [ctypes.c_int, ctypes.POINTER(ctypes.c_float)]),
@@ -29,13 +34,28 @@ class NPUModel:
         "gpt2": {"H":768, "NH":12, "DH":64, "INTER":3072, "V":50257, "NL":12, "MAXSEQ":1024},
     }
 
-    def __init__(self, model_name="gpt2", max_seq=1024, plugin_lib=None):
+    _ARCH = {
+        "gpt2": {"H":768, "NH":12, "DH":64, "INTER":3072, "V":50257, "NL":12,
+                 "MAXSEQ":1024, "rope":False, "swiglu":False, "rmsnorm":False},
+        "llama": {"H":4096, "NH":32, "DH":128, "INTER":11008, "V":32000, "NL":32,
+                  "MAXSEQ":2048, "rope":True, "swiglu":True, "rmsnorm":True},
+    }
+
+    def __init__(self, model_name="gpt2", max_seq=None, plugin_lib=None,
+                 dim=None, n_heads=None, inter=None, vocab=None, n_layers=None,
+                 use_rope=None, use_swiglu=None, use_rmsnorm=None):
         if plugin_lib:
             os.environ["NPU_PLUGIN_LIB"] = plugin_lib
-        self.cfg = self._ARCH.get(model_name)
-        if not self.cfg:
-            raise ValueError(f"Unsupported model: {model_name}. Supported: {list(self._ARCH)}")
-        self.cfg["MAXSEQ"] = max_seq
+        if model_name in self._ARCH:
+            self.cfg = dict(self._ARCH[model_name])
+        else:
+            # Custom architecture specified via kwargs
+            self.cfg = {"H": dim or 768, "NH": n_heads or 12, "DH": (dim or 768)//(n_heads or 12),
+                        "INTER": inter or 3072, "V": vocab or 32000, "NL": n_layers or 12,
+                        "MAXSEQ": max_seq or 2048, "rope": use_rope or False,
+                        "swiglu": use_swiglu or False, "rmsnorm": use_rmsnorm or False}
+        if max_seq:
+            self.cfg["MAXSEQ"] = max_seq
         self.lib = _get_lib()
         self._loaded = False
         self._nw = 0
@@ -164,3 +184,70 @@ def load_and_generate(prompt, model_name="gpt2", max_tokens=50, temperature=0.7,
     gen = model.generate(ids, max_new_tokens=max_tokens, temperature=temperature, top_k=top_k)
     model.close()
     return tok.decode(gen)
+
+def _load_llama_weights_from_hf(model, npu_model):
+    """Load a HuggingFace LLaMA/Qwen-style model onto the NPU.
+
+    Extracts weights directly from the torch model and loads them
+    into the CNA cache using the generic per-slot loader.
+    """
+    import torch, numpy as np
+    cfg = model.config
+    D = getattr(cfg, 'hidden_size', 4096)
+    NH = getattr(cfg, 'num_attention_heads', 32)
+    INTER = getattr(cfg, 'intermediate_size', 11008)
+    V = getattr(cfg, 'vocab_size', 32000)
+    NL = getattr(cfg, 'num_hidden_layers', 32)
+    HD = D // NH
+
+    sd = model.state_dict()
+    def t(k): return sd[k].detach().cpu().numpy().astype(np.float32)
+
+    npu_model.cfg["H"] = D; npu_model.cfg["NH"] = NH; npu_model.cfg["DH"] = HD
+    npu_model.cfg["INTER"] = INTER; npu_model.cfg["V"] = V; npu_model.cfg["NL"] = NL
+    npu_model.lib.npu_lm_init2(D, NH, INTER, V, NL, npu_model.cfg["MAXSEQ"], 1e-5, 1, 1, 1, 10000.0)
+
+    # Embeddings + final norm
+    lm = npu_model.lib
+    wte = np.ascontiguousarray(t("model.embed_tokens.weight"))
+    lm.npu_lm_load_embed(wte.ctypes.data_as(ctypes.c_void_p), None, V, 0)
+    lnf = np.ascontiguousarray(t("model.norm.weight"))
+    lm.npu_lm_load_final_norm(lnf.ctypes.data_as(ctypes.c_void_p), None)
+
+    # Per-layer
+    for i in range(NL):
+        p = f"model.layers.{i}."
+        wq = np.ascontiguousarray(t(p+"self_attn.q_proj.weight").T, dtype=np.float16)
+        wk = np.ascontiguousarray(t(p+"self_attn.k_proj.weight").T, dtype=np.float16)
+        wv = np.ascontiguousarray(t(p+"self_attn.v_proj.weight").T, dtype=np.float16)
+        wo = np.ascontiguousarray(t(p+"self_attn.o_proj.weight").T, dtype=np.float16)
+        wg = np.ascontiguousarray(t(p+"mlp.gate_proj.weight").T, dtype=np.float16)
+        wu = np.ascontiguousarray(t(p+"mlp.up_proj.weight").T, dtype=np.float16)
+        wd = np.ascontiguousarray(t(p+"mlp.down_proj.weight").T, dtype=np.float16)
+        n1 = np.ascontiguousarray(t(p+"input_layernorm.weight"), dtype=np.float32)
+        n2 = np.ascontiguousarray(t(p+"post_attention_layernorm.weight"), dtype=np.float32)
+        lm.npu_lm_load_slot(i, 0, wq.ctypes.data_as(ctypes.c_void_p), D, D)
+        lm.npu_lm_load_slot(i, 1, wk.ctypes.data_as(ctypes.c_void_p), D, D)
+        lm.npu_lm_load_slot(i, 2, wv.ctypes.data_as(ctypes.c_void_p), D, D)
+        lm.npu_lm_load_slot(i, 3, wo.ctypes.data_as(ctypes.c_void_p), D, D)
+        lm.npu_lm_load_slot(i, 4, wg.ctypes.data_as(ctypes.c_void_p), D, INTER)
+        lm.npu_lm_load_slot(i, 5, wu.ctypes.data_as(ctypes.c_void_p), D, INTER)
+        lm.npu_lm_load_slot(i, 6, wd.ctypes.data_as(ctypes.c_void_p), INTER, D)
+        lm.npu_lm_load_norm(i, n1.ctypes.data_as(ctypes.c_void_p), None,
+                            n2.ctypes.data_as(ctypes.c_void_p), None)
+        # Keep arrays alive
+        if not hasattr(npu_model, "_refs"): npu_model._refs = []
+        npu_model._refs.extend([wq,wk,wv,wo,wg,wu,wd,n1,n2,wte,lnf])
+
+    npu_model._loaded = True
+    npu_model._arch = "llama"
+
+
+def load_llama_weights(model):
+    """Convenience: load a HuggingFace LLaMA model onto the NPU.
+
+    Returns an NPUModel ready for npu_lm_generate.
+    """
+    npu = NPUModel(model_name="llama")
+    _load_llama_weights_from_hf(model, npu)
+    return npu
